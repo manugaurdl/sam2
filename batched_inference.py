@@ -15,20 +15,26 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 
-if os.path.isdir("/storage/users/manugaur"):
-    data_dir = "/storage/users/manugaur"
-elif os.path.isdir("/workspace/manugaur"):
-    data_dir = "/workspace/manugaur"
+if os.path.isdir("/storage/users/manugaur/mllm_inversion"):
+    data_dir = "/storage/users/manugaur/mllm_inversion"
+elif os.path.isdir("/workspace/manugaur/mllm_inversion"):
+    data_dir = "/workspace/manugaur/mllm_inversion"
 elif os.path.isdir("/data3/mgaur/mllm_inversion"):
     data_dir = "/data3/mgaur/mllm_inversion"
+elif os.path.isdir("/anvme/workspace/v115be13-mllm_inv/mllm_inversion"):
+    data_dir = "/anvme/workspace/v115be13-mllm_inv/mllm_inversion"
 else:
     raise Exception("input data dir bruh")
 
 def get_coco_path(cocoid_img_name: str) -> str:
+    if "anvme" in data_dir:
+        data_dir_coco = "/".join(data_dir.split("/")[:-1])
+    else:
+        data_dir_coco = data_dir
     if ".jpg" not in cocoid_img_name:
         cocoid_img_name += ".jpg"
     image_path = os.path.join(
-        data_dir, "coco", cocoid_img_name.split("_")[1], cocoid_img_name
+        data_dir_coco, "coco", cocoid_img_name.split("_")[1], cocoid_img_name
     )
     if os.path.isfile(image_path):
         return image_path
@@ -187,7 +193,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, help="train and val folders will be created here", required=True) 
     parser.add_argument("--split", type=str, choices=["train", "val"], required=True)
-    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_shards", type=int, help='how many shards to create from dataset', default=1)
     parser.add_argument("--shard_idx", type=int, help='which shard to operate on', default=0)
     args = parser.parse_args()
