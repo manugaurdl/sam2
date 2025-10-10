@@ -67,22 +67,55 @@ class ImageBoxDataset(Dataset):
         image_rgb: np.ndarray (H, W, 3), dtype=uint8
         boxes:     np.ndarray (1, 4) in [x1, y1, x2, y2]
     """
-    def __init__(self, split: str = "val"):
+    def __init__(
+        self, 
+        split = "val",
+        num_shards = 1,
+        shard_idx = 0,
+    ):
         parquet_path = os.path.join(
             data_dir,
             f"datasets/combined_df_2.4m_{split}_preproc_fixed_bbox_format_no_paco_no_cocostuff.parquet",
         )
         if not os.path.isfile(parquet_path):
             raise FileNotFoundError(f"Parquet not found: {parquet_path}")
-        self.df = get_bbox_df(pd.read_parquet(parquet_path))
+        FULL_DF = pd.read_parquet(parquet_path)
+        for _ in FULL_DF.bbox.tolist():
+            if isinstance(_, str):
+                raise Exception("dataframe has some bboxes stored in str format")
+        self.df = get_bbox_df(FULL_DF)
         
+        #sharding dataframe indices
+        n = len(self.df)
+        if not (0 <= shard_idx < num_shards):
+            raise ValueError(f"shard_idx must be in [0, {num_shards-1}], got {shard_idx}")
+
+        base = n // num_shards            # minimum rows per shard
+        rem  = n % num_shards             # extra rows to give to shard 0
+
+        # first shard gets the remainder
+        self._shard_len = base + (rem if shard_idx == 0 else 0)
+        # start offset: shard 0 starts at 0; rest start at (shard_idx * base + rem)
+        self._shard_start = 0 if shard_idx == 0 else (rem + shard_idx * base)
+
+        # store for convenience / debugging
+        self.num_shards = num_shards
+        self.shard_idx = shard_idx
+        self.total_len = n
+
     def __len__(self):
-        return len(self.df)
+        return self._shard_len
 
     def __getitem__(self, idx):
-        # Expected column order:
-        # uid, ref, bbox, cocoid, dataset, dataset_sample_idx, mask_rle_box, cap_len, og_df_index
-        uid, ref, bbox, cocoid, dataset, dataset_sample_idx, mask_rle_box, cap_len, og_df_index = tuple(self.df.iloc[idx])
+        
+        idx = self._shard_start + idx
+
+        # uid, ref, bbox, cocoid, dataset, dataset_sample_idx, mask_rle_box, cap_len, og_df_index = tuple(self.df.iloc[idx])
+        row = self.df.iloc[idx]
+        uid      = row["uid"]
+        bbox     = row["bbox"]
+        cocoid   = row["cocoid"]
+        dataset  = row["dataset"]
 
         # Pick image path
         if cocoid is not None:
@@ -124,10 +157,15 @@ def collate_images_boxes(batch):
 def main(args):
     save_dir = args.save_dir
     split = args.split
+    batch_size = args.batch_size
+    num_shards = args.num_shards
+    shard_idx = args.shard_idx
+    #### df path hardcoded ; data_dir hardcoded!!!
     os.makedirs(os.path.join(save_dir, split), exist_ok=True)
-
-    ds = ImageBoxDataset(split=split)
-    dl = DataLoader(ds, batch_size=24, shuffle=True, num_workers=8, collate_fn=collate_images_boxes)
+    
+    
+    ds = ImageBoxDataset(split=split, num_shards=num_shards, shard_idx=shard_idx)
+    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=8, collate_fn=collate_images_boxes)
 
 
     for images, boxes, df_idx in tqdm(dl, total=len(dl)):
@@ -148,10 +186,10 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, help="train and val folders will be created here", required=True) 
-    # parser.add_argument("--data_path", type=str, help="path to dataframe: mllm_inversion/datasets", required=True)
     parser.add_argument("--split", type=str, choices=["train", "val"], required=True)
-    # parser.add_argument("--gpu_num", type=int, default=1)
-    # parser.add_argument("--gpu_id", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--num_shards", type=int, help='how many shards to create from dataset', default=1)
+    parser.add_argument("--shard_idx", type=int, help='which shard to operate on', default=0)
     args = parser.parse_args()
     
     main(args)
