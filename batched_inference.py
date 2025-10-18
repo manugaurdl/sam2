@@ -3,7 +3,7 @@ import torch
 from PIL import Image
 from accelerate import Accelerator
 from tqdm import tqdm
-
+import json
 device = Accelerator().device
 model = Sam2Model.from_pretrained("facebook/sam2.1-hiera-large").to(device)
 processor = Sam2Processor.from_pretrained("facebook/sam2.1-hiera-large")
@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
+import gc
+
 
 if os.path.isdir("/storage/users/manugaur/mllm_inversion"):
     data_dir = "/storage/users/manugaur/mllm_inversion"
@@ -56,12 +58,12 @@ def get_mapillary_path(uid: str) -> str:
         return img_path
     raise Exception(f"{img_path} not found")
 
-def get_bbox_df(df):
+def get_bbox_or_point_df(df, num_points):
     mask = df['bbox'].apply(
         lambda x: (
-            isinstance(x, (list, tuple)) and len(x) == 4
+            isinstance(x, (list, tuple)) and len(x) == num_points
         ) or (
-            isinstance(x, np.ndarray) and x.ndim == 1 and x.size == 4
+            isinstance(x, np.ndarray) and x.ndim == 1 and x.size == num_points
         )
     )
     
@@ -78,6 +80,7 @@ class ImageBoxDataset(Dataset):
         split = "val",
         num_shards = 1,
         shard_idx = 0,
+        bbox_input=True, 
     ):
         parquet_path = os.path.join(
             data_dir,
@@ -89,8 +92,21 @@ class ImageBoxDataset(Dataset):
         for _ in FULL_DF.bbox.tolist():
             if isinstance(_, str):
                 raise Exception("dataframe has some bboxes stored in str format")
-        self.df = get_bbox_df(FULL_DF)
+        if bbox_input:
+            self.df = get_bbox_or_point_df(FULL_DF, num_points=4)
+        else:
+            self.df = get_bbox_or_point_df(FULL_DF, num_points=2)
+        # print(len(self.df))
+        # from pathlib import Path
+        # root = Path("/data3/mgaur/mllm_inversion/seg_masks/train")
+        # mask_missing = ~self.df.index.map(lambda i: (root / f"{i}.pt").is_file())
+        # import ipdb;ipdb.set_trace()
+        # df_missing = self.df[mask_missing]   # keeps original index
         
+        #### if some ids are missed by sam initially:
+        # idxs = [int(_.split("/")[-1].split(".")[0]) for _ in json.load(open("/home/mgaur/missing.json", "r"))]
+        # self.df = self.df.loc[idxs]
+
         #sharding dataframe indices
         n = len(self.df)
         if not (0 <= shard_idx < num_shards):
@@ -114,10 +130,12 @@ class ImageBoxDataset(Dataset):
 
     def __getitem__(self, idx):
         
-        idx = self._shard_start + idx
+        pos = self._shard_start + idx        # was: idx = self._shard_start + idx
+        row = self.df.iloc[pos]
+        label_idx = row.name
 
         # uid, ref, bbox, cocoid, dataset, dataset_sample_idx, mask_rle_box, cap_len, og_df_index = tuple(self.df.iloc[idx])
-        row = self.df.iloc[idx]
+        # row = self.df.iloc[idx]
         uid      = row["uid"]
         bbox     = row["bbox"]
         cocoid   = row["cocoid"]
@@ -141,9 +159,10 @@ class ImageBoxDataset(Dataset):
             boxes = np.array([x, y, x_max, y_max], dtype=float).reshape(1, 4)
         else:
             # Assume already [x1,y1,x2,y2] or (N,4)
-            boxes = np.array(bbox, dtype=float)
-            if boxes.ndim == 1:
-                boxes = boxes.reshape(1, 4)
+            boxes = bbox.tolist()
+            # boxes = np.array(bbox, dtype=float)
+            # if boxes.ndim == 1:
+            #     boxes = boxes.reshape(1, 2)
 
         # Read image (BGR -> RGB)
         image_bgr = cv2.imread(img_path)
@@ -151,7 +170,7 @@ class ImageBoxDataset(Dataset):
             raise FileNotFoundError(f"Failed to read image at {img_path}")
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-        return image_rgb, boxes, idx
+        return image_rgb, boxes, label_idx
 
 def collate_images_boxes(batch):
     # batch is list of tuples: [(image_rgb, boxes), ...]
@@ -161,6 +180,10 @@ def collate_images_boxes(batch):
     return images, boxes, idx 
 
 def main(args):
+    if args.bbox_input:
+        print("|BBOX inputs")
+    else:
+        print("|POINT inputs")
     save_dir = args.save_dir
     split = args.split
     batch_size = args.batch_size
@@ -169,17 +192,25 @@ def main(args):
     #### df path hardcoded ; data_dir hardcoded!!!
     os.makedirs(os.path.join(save_dir, split), exist_ok=True)
     
-    
-    ds = ImageBoxDataset(split=split, num_shards=num_shards, shard_idx=shard_idx)
+    ds = ImageBoxDataset(split=split, num_shards=num_shards, shard_idx=shard_idx, bbox_input = args.bbox_input)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=8, collate_fn=collate_images_boxes)
 
 
-    for images, boxes, df_idx in tqdm(dl, total=len(dl)):
-        inputs = processor(images=images, input_boxes=boxes, return_tensors="pt").to(device)
+    for batch_idx, (images, boxes, df_idx) in tqdm(enumerate(dl), total=len(dl)):
+        """boxes can be bbox or point"""
+        if batch_idx % 10 == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        if args.bbox_input:
+            inputs = processor(images=images, input_boxes=boxes, return_tensors="pt").to(device)
+        else:
+            input_points = [[[_]]for _ in boxes] # Single point click, 4 dimensions (image_dim, object_dim, point_per_object_dim, coordinates)
+            input_labels = [[[1]] for _ in boxes]  # 1 for positive click, 0 for negative click, 3 dimensions (image_dim, object_dim, point_label)
+            inputs = processor(images=images, input_points=input_points, input_labels=input_labels, return_tensors="pt").to(device)
         
         with torch.no_grad():
             outputs = model(**inputs)
-        
         masks = processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])
 
         for idx in range(len(masks)):
@@ -196,6 +227,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_shards", type=int, help='how many shards to create from dataset', default=1)
     parser.add_argument("--shard_idx", type=int, help='which shard to operate on', default=0)
+    parser.add_argument("--bbox_input", action='store_true', help='bbox or point')
     args = parser.parse_args()
     
     main(args)

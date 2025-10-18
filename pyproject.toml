@@ -15,6 +15,7 @@ dependencies = [
     "jupyter-bbox-widget>=0.6.0",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
+    "pycocotools>=2.0.10",
     "supervision>=0.26.1",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
