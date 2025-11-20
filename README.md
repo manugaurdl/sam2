@@ -1,3 +1,22 @@
+## Creating tokenized ground truth seg masks
+
+#### Curate seg_masks for bbox input
+```bash
+python batched_inference.py --args
+```
+
+#### Tokenize seg_masks, both : SAM data or describe anything 
+```bash
+python tokenize_seg_mask.py
+```
+
+#### Stack all tensors to create one train.pt
+```bash
+python stack_tokenized_tensors.py
+```
+
+##
+
 # SAM 2: Segment Anything in Images and Videos
 
 **[AI at Meta, FAIR](https://ai.meta.com/research/)**
